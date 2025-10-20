@@ -4,68 +4,50 @@
 [![Build Status](https://github.com/erincatto/box2d/actions/workflows/build.yml/badge.svg)](https://github.com/erincatto/box2d/actions)
 
 # Box2D 
-
 Box2D is a 2D physics engine for games.
 
-## Contributing
-
-Please do not submit pull requests with new features or core library changes. Instead, please file an issue first for discussion. For bugs, I prefer detailed bug reports over pull requests.
+[![Box2D Version 3.0 Release Demo](https://img.youtube.com/vi/dAoM-xjOWtA/0.jpg)](https://www.youtube.com/watch?v=dAoM-xjOWtA)
 
 ## Features
 
 ### Collision
 - Continuous collision detection
-- Contact callbacks: begin, end, pre-solve, post-solve
-- Convex polygons and circles
+- Contact events
+- Convex polygons, capsules, circles, rounded polygons, segments, and chains
 - Multiple shapes per body
-- One-shot contact manifolds
-- Dynamic tree broadphase
-- Efficient pair management
-- Fast broadphase AABB queries
-- Collision groups and categories
+- Collision filtering
+- Ray casts, shape casts, and overlap queries
+- Sensor system
 
 ### Physics
-- Continuous physics with time of impact solver
-- Persistent body-joint-contact graph
-- Island solution and sleep management
-- Contact, friction, and restitution
-- Stable stacking with a linear-time solver
-- Revolute, prismatic, distance, pulley, gear, mouse joint, and other joint types
-- Joint limits, motors, and friction
-- Momentum decoupled position correction
-- Fairly accurate reaction forces/impulses
+- Robust _Soft Step_ rigid body solver
+- Continuous physics for fast translations and rotations
+- Island based sleep
+- Revolute, prismatic, distance, mouse joint, weld, and wheel joints
+- Joint limits, motors, springs, and friction
+- Joint and contact forces
+- Body movement events and sleep notification
 
 ### System
-- Small block and stack allocators
-- Centralized tuning parameters
-- Highly portable C++ with no use of STL containers
+- Data-oriented design
+- Written in portable C17
+- Extensive multithreading and SIMD
+- Optimized for large piles of bodies
 
-### Testbed
-- OpenGL with GLFW
+### Samples
+- OpenGL with GLFW and enkiTS
 - Graphical user interface with imgui
-- Extensible test framework
-- Support for loading world dumps
+- Many samples to demonstrate features and performance
 
-## Building
+## Building for Visual Studio
 - Install [CMake](https://cmake.org/)
 - Ensure CMake is in the user `PATH`
-- Visual Studio: run `build.bat` from the command prompt
-- Otherwise: run `build.sh` from a bash shell
+- Run `create_sln.bat`
+- Open and build `build/box2d.sln`
+
+## Building for Linux
+- Run `build.sh` from a bash shell
 - Results are in the build sub-folder
-- On Windows you can open box2d.sln
-
-## Building Box2D - Using vcpkg
-You can download and install Box2D using the [vcpkg](https://github.com/Microsoft/vcpkg) dependency manager:
-
-- git clone https://github.com/Microsoft/vcpkg.git
-- cd vcpkg
-- ./bootstrap-vcpkg.sh
-- ./vcpkg integrate install
-- ./vcpkg install box2d
-
-The Box2D port in vcpkg is kept up to date by Microsoft team members and community contributors. If the version is out of date, please [create an issue or pull request](https://github.com/Microsoft/vcpkg) on the vcpkg repository.
-
-Note: vcpkg support is not provided by the Box2D project
 
 ## Building for Xcode
 - Install [CMake](https://cmake.org)
@@ -74,36 +56,48 @@ Note: vcpkg support is not provided by the Box2D project
 - mkdir build
 - cd build
 - cmake -G Xcode ..
-- open box2d.xcodeproj
-- Select the testbed scheme
-- Edit the scheme to set a custom working directory, make this be in box2d/testbed
-- You can now build and run the testbed
+- Open `box2d.xcodeproj`
+- Select the samples scheme
+- Build and run the samples
 
-## Installing using CMake
-You can build and install the library and docs using this command sequence (requires Doxygen):
-```
-mkdir build
-cd build
-cmake -DBOX2D_BUILD_DOCS=ON ..
-cmake --build .
-cmake --build . --target INSTALL
-```
-On Windows this tries to install in `Program Files` and thus requires admin privileges. Alternatively you can target another directory using something like this:
-```
-mkdir build
-cd build
-cmake -DBOX2D_BUILD_DOCS=ON -DCMAKE_INSTALL_PREFIX="C:/packages" ..
-cmake --build .
-cmake --build . --target INSTALL
-```
+## Building and installing
+- mkdir build
+- cd build
+- cmake ..
+- cmake --build . --config Release
+- cmake --install . (might need sudo)
+
+## Compatibility
+The Box2D library and samples build and run on Windows, Linux, and Mac.
+
+You will need a compiler that supports C17 to build the Box2D library.
+
+You will need a compiler that supports C++20 to build the samples.
+
+Box2D uses SSE2 and Neon SIMD math to improve performance. This can be disabled by defining `BOX2D_DISABLE_SIMD`.
 
 ## Documentation
 - [Manual](https://box2d.org/documentation/)
-- [reddit](https://www.reddit.com/r/box2d/)
+- [Migration Guide](https://github.com/erincatto/box2d/blob/main/docs/migration.md)
+
+## Community
 - [Discord](https://discord.gg/NKYgCBP)
 
+## Contributing
+Please do not submit pull requests. Instead, please file an issue for bugs or feature requests. For support, please visit the Discord server.
+
+# Giving Feedback
+Please file an issue or start a chat on discord. You can also use [GitHub Discussions](https://github.com/erincatto/box2d/discussions).
+
 ## License
-Box2D is developed by Erin Catto, and uses the [MIT license](https://en.wikipedia.org/wiki/MIT_License).
+Box2D is developed by Erin Catto and uses the [MIT license](https://en.wikipedia.org/wiki/MIT_License).
 
 ## Sponsorship
-Support development of Box2D through [Github Sponsors](https://github.com/sponsors/erincatto)
+Support development of Box2D through [Github Sponsors](https://github.com/sponsors/erincatto).
+
+Please consider starring this repository and subscribing to my [YouTube channel](https://www.youtube.com/@erin_catto).
+
+## External ports, wrappers, and bindings (unsupported)
+- Beef bindings - https://github.com/EnokViking/Box2DBeef
+- C++ bindings - https://github.com/HolyBlackCat/box2cpp
+- WASM - https://github.com/Birch-san/box2d3-wasm
