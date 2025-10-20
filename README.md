@@ -1,23 +1,56 @@
-# box2d
+# box2d-swift
 
-Little wrap around [box2d](https://github.com/erincatto/box2d) library.
+Swift Package Manager wrapper for [Box2D](https://github.com/erincatto/box2d) v3.1.0.
 
-## How to use 
+## Requirements
 
-1. Add package as dependency to your project `.package("https://github.com/SpectralDragon/box2d-swift", .branch("main"))`
-2. Add target `box2d` to your target
-3. Add this code to your target:             
+- Swift 5.9+
+- Xcode 15+ (for C++ interoperability)
+
+## Installation
+
+Add this package as a dependency in your `Package.swift`:
 
 ```swift
-// For Swift 5.6
-swiftSettings: [
-    .unsafeFlags(["-Xfrontend", "-enable-cxx-interop"])
-]
-
-// For Swift 5.7 and higher
-swiftSettings: [
-    .unsafeFlags(["-Xfrontend", "-enable-experimental-cxx-interop"])
+dependencies: [
+    .package(url: "https://github.com/soulfresh/box2d-swift", branch: "main")
 ]
 ```
 
-4. Enjoy!
+Then add `box2d` to your target's dependencies:
+
+```swift
+targets: [
+    .target(
+        name: "YourTarget",
+        dependencies: [
+            .product(name: "box2d", package: "box2d-swift")
+        ],
+        swiftSettings: [
+            .interoperabilityMode(.Cxx)
+        ]
+    )
+]
+```
+
+## Usage
+
+Import Box2D in your Swift code:
+
+```swift
+import box2d
+
+// Create a world
+var worldDef = b2DefaultWorldDef()
+let worldId = b2CreateWorld(&worldDef)
+
+// Add bodies, simulate, etc.
+b2World_Step(worldId, 1.0/60.0, 4)
+
+// Clean up
+b2DestroyWorld(worldId)
+```
+
+## License
+
+Box2D is developed by Erin Catto and licensed under the MIT license.
