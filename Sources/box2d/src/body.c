@@ -10,10 +10,10 @@
 #include "id_pool.h"
 #include "island.h"
 #include "joint.h"
-#include "physics_world.h"
 #include "sensor.h"
 #include "shape.h"
 #include "solver_set.h"
+#include "world.h"
 
 #include "box2d/box2d.h"
 #include "box2d/id.h"
@@ -232,11 +232,6 @@ b2BodyId b2CreateBody( b2WorldId worldId, const b2BodyDef* def )
 
 	int bodyId = b2AllocId( &world->bodyIdPool );
 
-	uint32_t lockFlags = 0;
-	lockFlags |= def->motionLocks.linearX ? b2_lockLinearX : 0;
-	lockFlags |= def->motionLocks.linearY ? b2_lockLinearY : 0;
-	lockFlags |= def->motionLocks.angularZ ? b2_lockAngularZ : 0;
-
 	b2SolverSet* set = b2SolverSetArray_Get( &world->solverSets, setId );
 	b2BodySim* bodySim = b2BodySimArray_Add( &set->bodySims );
 	*bodySim = (b2BodySim){ 0 };
@@ -251,10 +246,8 @@ b2BodyId b2CreateBody( b2WorldId worldId, const b2BodyDef* def )
 	bodySim->angularDamping = def->angularDamping;
 	bodySim->gravityScale = def->gravityScale;
 	bodySim->bodyId = bodyId;
-	bodySim->flags = lockFlags;
-	bodySim->flags |= def->isBullet ? b2_isBullet : 0;
-	bodySim->flags |= def->allowFastRotation ? b2_allowFastRotation : 0;
-	bodySim->flags |= def->type == b2_dynamicBody ? b2_dynamicFlag : 0;
+	bodySim->isBullet = def->isBullet;
+	bodySim->allowFastRotation = def->allowFastRotation;
 
 	if ( setId == b2_awakeSet )
 	{
@@ -265,7 +258,6 @@ b2BodyId b2CreateBody( b2WorldId worldId, const b2BodyDef* def )
 		bodyState->linearVelocity = def->linearVelocity;
 		bodyState->angularVelocity = def->angularVelocity;
 		bodyState->deltaRotation = b2Rot_identity;
-		bodyState->flags = bodySim->flags;
 	}
 
 	if ( bodyId == world->bodies.count )
@@ -282,13 +274,13 @@ b2BodyId b2CreateBody( b2WorldId worldId, const b2BodyDef* def )
 	if ( def->name )
 	{
 		int i = 0;
-		while ( i < B2_NAME_LENGTH - 1 && def->name[i] != 0 )
+		while ( i < 31 && def->name[i] != 0 )
 		{
 			body->name[i] = def->name[i];
 			i += 1;
 		}
 
-		while ( i < B2_NAME_LENGTH )
+		while ( i < 32 )
 		{
 			body->name[i] = 0;
 			i += 1;
@@ -296,7 +288,7 @@ b2BodyId b2CreateBody( b2WorldId worldId, const b2BodyDef* def )
 	}
 	else
 	{
-		memset( body->name, 0, B2_NAME_LENGTH * sizeof( char ) );
+		memset( body->name, 0, 32 * sizeof( char ) );
 	}
 
 	body->userData = def->userData;
@@ -320,8 +312,10 @@ b2BodyId b2CreateBody( b2WorldId worldId, const b2BodyDef* def )
 	body->sleepThreshold = def->sleepThreshold;
 	body->sleepTime = 0.0f;
 	body->type = def->type;
-	body->flags = bodySim->flags;
 	body->enableSleep = def->enableSleep;
+	body->fixedRotation = def->fixedRotation;
+	body->isSpeedCapped = false;
+	body->isMarked = false;
 
 	// dynamic and kinematic bodies that are enabled need a island
 	if ( setId >= b2_awakeSet )
@@ -340,7 +334,6 @@ bool b2WakeBody( b2World* world, b2Body* body )
 	if ( body->setIndex >= b2_firstSleepingSet )
 	{
 		b2WakeSolverSet( world, body->setIndex );
-		b2ValidateSolverSets( world );
 		return true;
 	}
 
@@ -489,7 +482,6 @@ int b2Body_GetContactData( b2BodyId bodyId, b2ContactData* contactData, int capa
 			b2Shape* shapeA = b2ShapeArray_Get( &world->shapes, contact->shapeIdA );
 			b2Shape* shapeB = b2ShapeArray_Get( &world->shapes, contact->shapeIdB );
 
-			contactData[index].contactId = (b2ContactId){ contact->contactId + 1, bodyId.world0, 0, contact->generation };
 			contactData[index].shapeIdA = (b2ShapeId){ shapeA->id + 1, bodyId.world0, shapeA->generation };
 			contactData[index].shapeIdB = (b2ShapeId){ shapeB->id + 1, bodyId.world0, shapeB->generation };
 
@@ -551,7 +543,6 @@ void b2UpdateBodyMassData( b2World* world, b2Body* body )
 	if ( body->type != b2_dynamicBody )
 	{
 		bodySim->center = bodySim->transform.p;
-		bodySim->center0 = bodySim->center;
 
 		// Need extents for kinematic bodies for sleeping to work correctly.
 		if ( body->type == b2_kinematicBody )
@@ -572,13 +563,9 @@ void b2UpdateBodyMassData( b2World* world, b2Body* body )
 		return;
 	}
 
-	int shapeCount = body->shapeCount;
-	b2MassData* masses = b2AllocateArenaItem( &world->arena, shapeCount * sizeof( b2MassData ), "mass data" );
-
 	// Accumulate mass over all shapes.
 	b2Vec2 localCenter = b2Vec2_zero;
 	int shapeId = body->headShapeId;
-	int shapeIndex = 0;
 	while ( shapeId != B2_NULL_INDEX )
 	{
 		const b2Shape* s = b2ShapeArray_Get( &world->shapes, shapeId );
@@ -586,16 +573,13 @@ void b2UpdateBodyMassData( b2World* world, b2Body* body )
 
 		if ( s->density == 0.0f )
 		{
-			masses[shapeIndex] = (b2MassData){ 0 };
 			continue;
 		}
 
 		b2MassData massData = b2ComputeShapeMass( s );
 		body->mass += massData.mass;
 		localCenter = b2MulAdd( localCenter, massData.mass, massData.center );
-
-		masses[shapeIndex] = massData;
-		shapeIndex += 1;
+		body->inertia += massData.rotationalInertia;
 	}
 
 	// Compute center of mass.
@@ -605,28 +589,11 @@ void b2UpdateBodyMassData( b2World* world, b2Body* body )
 		localCenter = b2MulSV( bodySim->invMass, localCenter );
 	}
 
-	// Second loop to accumulate the rotational inertia about the center of mass
-	for ( shapeIndex = 0; shapeIndex < shapeCount; ++shapeIndex )
+	if ( body->inertia > 0.0f && body->fixedRotation == false )
 	{
-		b2MassData massData = masses[shapeIndex];
-		if ( massData.mass == 0.0f )
-		{
-			continue;
-		}
-
-		// Shift to center of mass. This is safe because it can only increase.
-		b2Vec2 offset = b2Sub( localCenter, massData.center );
-		float inertia = massData.rotationalInertia + massData.mass * b2Dot( offset, offset );
-		body->inertia += inertia;
-	}
-
-	b2FreeArenaItem( &world->arena, masses );
-	masses = NULL;
-
-	B2_ASSERT( body->inertia >= 0.0f );
-
-	if ( body->inertia > 0.0f )
-	{
+		// Center the inertia about the center of mass.
+		body->inertia -= body->mass * b2Dot( localCenter, localCenter );
+		B2_ASSERT( body->inertia > 0.0f );
 		bodySim->invInertia = 1.0f / body->inertia;
 	}
 	else
@@ -826,7 +793,7 @@ void b2Body_SetAngularVelocity( b2BodyId bodyId, float angularVelocity )
 	b2World* world = b2GetWorld( bodyId.world0 );
 	b2Body* body = b2GetBodyFullId( world, bodyId );
 
-	if ( body->type == b2_staticBody || ( body->flags & b2_lockAngularZ ) )
+	if ( body->type == b2_staticBody || body->fixedRotation )
 	{
 		return;
 	}
@@ -850,11 +817,6 @@ void b2Body_SetTargetTransform( b2BodyId bodyId, b2Transform target, float timeS
 	b2World* world = b2GetWorld( bodyId.world0 );
 	b2Body* body = b2GetBodyFullId( world, bodyId );
 
-	if ( body->setIndex == b2_disabledSet )
-	{
-		return;
-	}
-
 	if ( body->type == b2_staticBody || timeStep <= 0.0f )
 	{
 		return;
@@ -869,29 +831,32 @@ void b2Body_SetTargetTransform( b2BodyId bodyId, b2Transform target, float timeS
 	b2Vec2 linearVelocity = b2MulSV( invTimeStep, b2Sub( center2, center1 ) );
 
 	// Compute angular velocity
-	b2Rot q1 = sim->transform.q;
-	b2Rot q2 = target.q;
-	float deltaAngle = b2RelativeAngle( q1, q2 );
-	float angularVelocity = invTimeStep * deltaAngle;
-
-	// Early out if the body is asleep already and the desired movement is small
-	if ( body->setIndex != b2_awakeSet )
+	float angularVelocity = 0.0f;
+	if ( body->fixedRotation == false )
 	{
-		float maxVelocity = b2Length( linearVelocity ) + b2AbsFloat( angularVelocity ) * sim->maxExtent;
-
-		// Return if velocity would be sleepy
-		if ( maxVelocity < body->sleepThreshold )
-		{
-			return;
-		}
-
-		// Must wake for state to exist
-		b2WakeBody( world, body );
+		b2Rot q1 = sim->transform.q;
+		b2Rot q2 = target.q;
+		float deltaAngle = b2RelativeAngle( q2, q1 );
+		angularVelocity = invTimeStep * deltaAngle;
 	}
 
-	B2_ASSERT( body->setIndex == b2_awakeSet );
+	float maxVelocity = b2Length( linearVelocity ) + b2AbsFloat( angularVelocity ) * sim->maxExtent;
+
+	// Return if velocity would be sleepy
+	if ( maxVelocity < body->sleepThreshold )
+	{
+		return;
+	}
+
+	// Must wake for state to exist
+	b2WakeBody( world, body );
 
 	b2BodyState* state = b2GetBodyState( world, body );
+	if ( state == NULL )
+	{
+		return;
+	}
+
 	state->linearVelocity = linearVelocity;
 	state->angularVelocity = angularVelocity;
 }
@@ -937,11 +902,6 @@ void b2Body_ApplyForce( b2BodyId bodyId, b2Vec2 force, b2Vec2 point, bool wake )
 	b2World* world = b2GetWorld( bodyId.world0 );
 	b2Body* body = b2GetBodyFullId( world, bodyId );
 
-	if ( body->type != b2_dynamicBody || body->setIndex == b2_disabledSet )
-	{
-		return;
-	}
-
 	if ( wake && body->setIndex >= b2_firstSleepingSet )
 	{
 		b2WakeBody( world, body );
@@ -960,11 +920,6 @@ void b2Body_ApplyForceToCenter( b2BodyId bodyId, b2Vec2 force, bool wake )
 	b2World* world = b2GetWorld( bodyId.world0 );
 	b2Body* body = b2GetBodyFullId( world, bodyId );
 
-	if ( body->type != b2_dynamicBody || body->setIndex == b2_disabledSet )
-	{
-		return;
-	}
-
 	if ( wake && body->setIndex >= b2_firstSleepingSet )
 	{
 		b2WakeBody( world, body );
@@ -982,11 +937,6 @@ void b2Body_ApplyTorque( b2BodyId bodyId, float torque, bool wake )
 	b2World* world = b2GetWorld( bodyId.world0 );
 	b2Body* body = b2GetBodyFullId( world, bodyId );
 
-	if ( body->type != b2_dynamicBody || body->setIndex == b2_disabledSet )
-	{
-		return;
-	}
-
 	if ( wake && body->setIndex >= b2_firstSleepingSet )
 	{
 		b2WakeBody( world, body );
@@ -999,24 +949,10 @@ void b2Body_ApplyTorque( b2BodyId bodyId, float torque, bool wake )
 	}
 }
 
-void b2Body_ClearForces( b2BodyId bodyId )
-{
-	b2World* world = b2GetWorld( bodyId.world0 );
-	b2Body* body = b2GetBodyFullId( world, bodyId );
-	b2BodySim* bodySim = b2GetBodySim( world, body );
-	bodySim->force = b2Vec2_zero;
-	bodySim->torque = 0.0f;
-}
-
 void b2Body_ApplyLinearImpulse( b2BodyId bodyId, b2Vec2 impulse, b2Vec2 point, bool wake )
 {
 	b2World* world = b2GetWorld( bodyId.world0 );
 	b2Body* body = b2GetBodyFullId( world, bodyId );
-
-	if ( body->type != b2_dynamicBody || body->setIndex == b2_disabledSet )
-	{
-		return;
-	}
 
 	if ( wake && body->setIndex >= b2_firstSleepingSet )
 	{
@@ -1032,7 +968,7 @@ void b2Body_ApplyLinearImpulse( b2BodyId bodyId, b2Vec2 impulse, b2Vec2 point, b
 		state->linearVelocity = b2MulAdd( state->linearVelocity, bodySim->invMass, impulse );
 		state->angularVelocity += bodySim->invInertia * b2Cross( b2Sub( point, bodySim->center ), impulse );
 
-		b2LimitVelocity( state, world->maxLinearSpeed );
+		b2LimitVelocity(state, world->maxLinearSpeed );
 	}
 }
 
@@ -1040,11 +976,6 @@ void b2Body_ApplyLinearImpulseToCenter( b2BodyId bodyId, b2Vec2 impulse, bool wa
 {
 	b2World* world = b2GetWorld( bodyId.world0 );
 	b2Body* body = b2GetBodyFullId( world, bodyId );
-
-	if ( body->type != b2_dynamicBody || body->setIndex == b2_disabledSet )
-	{
-		return;
-	}
 
 	if ( wake && body->setIndex >= b2_firstSleepingSet )
 	{
@@ -1067,12 +998,10 @@ void b2Body_ApplyAngularImpulse( b2BodyId bodyId, float impulse, bool wake )
 {
 	B2_ASSERT( b2Body_IsValid( bodyId ) );
 	b2World* world = b2GetWorld( bodyId.world0 );
-	b2Body* body = b2GetBodyFullId( world, bodyId );
 
-	if ( body->type != b2_dynamicBody || body->setIndex == b2_disabledSet )
-	{
-		return;
-	}
+	int id = bodyId.index1 - 1;
+	b2Body* body = b2BodyArray_Get( &world->bodies, id );
+	B2_ASSERT( body->generation == bodyId.generation );
 
 	if ( wake && body->setIndex >= b2_firstSleepingSet )
 	{
@@ -1097,33 +1026,13 @@ b2BodyType b2Body_GetType( b2BodyId bodyId )
 	return body->type;
 }
 
-// This should follow similar steps as you would get destroying and recreating the body, shapes, and joints.
-// Contacts are difficult to preserve because the broad-phase pairs change, so I just destroy them.
-// todo with a bit more effort I could support an option to let the body sleep
-//
-// Revised steps:
-// 1 Skip disabled bodies
-// 2 Destroy all contacts on the body
-// 3 Wake the body
-// 4 For all joints attached to the body
-//  - wake attached bodies
-//  - remove from island
-//  - move to static set temporarily
-// 5 Change the body type and transfer the body
-// 6 If the body was static
-//   - create an island for the body
-//   Else if the body is becoming static
-//   - remove it from the island
-// 7 For all joints
-//  - if either body is non-static
-//    - link into island
-//    - transfer to constraint graph
-// 8 For all shapes
-//  - Destroy proxy in old tree
-//  - Create proxy in new tree
-// Notes:
-// - the implementation below tries to minimize the number of predicates, so some
-//   operations may have no effect, such as transferring a joint to the same set
+// Changing the body type is quite complex mainly due to joints.
+// Considerations:
+// - body and joints must be moved to the correct set
+// - islands must be updated
+// - graph coloring must be correct
+// - any body connected to a joint may be disabled
+// - joints between static bodies must go into the static set
 void b2Body_SetType( b2BodyId bodyId, b2BodyType type )
 {
 	b2World* world = b2GetWorld( bodyId.world0 );
@@ -1135,182 +1044,243 @@ void b2Body_SetType( b2BodyId bodyId, b2BodyType type )
 		return;
 	}
 
-	// Stage 1: skip disabled bodies
 	if ( body->setIndex == b2_disabledSet )
 	{
 		// Disabled bodies don't change solver sets or islands when they change type.
 		body->type = type;
 
-		if ( type == b2_dynamicBody )
-		{
-			body->flags |= b2_dynamicFlag;
-		}
-		else
-		{
-			body->flags &= ~b2_dynamicFlag;
-		}
-
-		// Body type affects the mass properties
+		// Body type affects the mass
 		b2UpdateBodyMassData( world, body );
 		return;
 	}
 
-	// Stage 2: destroy all contacts but don't wake bodies (because we don't need to)
+	// Destroy all contacts but don't wake bodies.
 	bool wakeBodies = false;
 	b2DestroyBodyContacts( world, body, wakeBodies );
 
-	// Stage 3: wake this body (does nothing if body is static), otherwise it will also wake
-	// all bodies in the same sleeping solver set.
+	// Wake this body because we assume below that it is awake or static.
 	b2WakeBody( world, body );
 
-	// Stage 4: move joints to temporary storage
-	b2SolverSet* staticSet = b2SolverSetArray_Get( &world->solverSets, b2_staticSet );
-
-	int jointKey = body->headJointKey;
-	while ( jointKey != B2_NULL_INDEX )
+	// Unlink all joints and wake attached bodies.
 	{
-		int jointId = jointKey >> 1;
-		int edgeIndex = jointKey & 1;
-
-		b2Joint* joint = b2JointArray_Get( &world->joints, jointId );
-		jointKey = joint->edges[edgeIndex].nextKey;
-
-		// Joint may be disabled by other body
-		if ( joint->setIndex == b2_disabledSet )
+		int jointKey = body->headJointKey;
+		while ( jointKey != B2_NULL_INDEX )
 		{
-			continue;
+			int jointId = jointKey >> 1;
+			int edgeIndex = jointKey & 1;
+
+			b2Joint* joint = b2JointArray_Get( &world->joints, jointId );
+			if ( joint->islandId != B2_NULL_INDEX )
+			{
+				b2UnlinkJoint( world, joint );
+			}
+
+			// A body going from static to dynamic or kinematic goes to the awake set
+			// and other attached bodies must be awake as well. For consistency, this is
+			// done for all cases.
+			b2Body* bodyA = b2BodyArray_Get( &world->bodies, joint->edges[0].bodyId );
+			b2Body* bodyB = b2BodyArray_Get( &world->bodies, joint->edges[1].bodyId );
+			b2WakeBody( world, bodyA );
+			b2WakeBody( world, bodyB );
+
+			jointKey = joint->edges[edgeIndex].nextKey;
 		}
-
-		// Wake attached bodies. The b2WakeBody call above does not wake bodies
-		// attached to a static body. But it is necessary because the body may have
-		// no joints.
-		b2Body* bodyA = b2BodyArray_Get( &world->bodies, joint->edges[0].bodyId );
-		b2Body* bodyB = b2BodyArray_Get( &world->bodies, joint->edges[1].bodyId );
-		b2WakeBody( world, bodyA );
-		b2WakeBody( world, bodyB );
-
-		// Remove joint from island
-		b2UnlinkJoint( world, joint );
-
-		// It is necessary to transfer all joints to the static set
-		// so they can be added to the constraint graph below and acquire consistent colors.
-		b2SolverSet* jointSourceSet = b2SolverSetArray_Get( &world->solverSets, joint->setIndex );
-		b2TransferJoint( world, staticSet, jointSourceSet, joint );
 	}
 
-	// Stage 5: change the body type and transfer body
 	body->type = type;
 
-	if ( type == b2_dynamicBody )
-	{
-		body->flags |= b2_dynamicFlag;
-	}
-	else
-	{
-		body->flags &= ~b2_dynamicFlag;
-	}
-
-	b2SolverSet* awakeSet = b2SolverSetArray_Get( &world->solverSets, b2_awakeSet );
-	b2SolverSet* sourceSet = b2SolverSetArray_Get( &world->solverSets, body->setIndex );
-	b2SolverSet* targetSet = type == b2_staticBody ? staticSet : awakeSet;
-
-	// Transfer body
-	b2TransferBody( world, targetSet, sourceSet, body );
-
-	// Stage 6: update island participation for the body
 	if ( originalType == b2_staticBody )
 	{
+		// Body is going from static to dynamic or kinematic. It only makes sense to move it to the awake set.
+		B2_ASSERT( body->setIndex == b2_staticSet );
+
+		b2SolverSet* staticSet = b2SolverSetArray_Get( &world->solverSets, b2_staticSet );
+		b2SolverSet* awakeSet = b2SolverSetArray_Get( &world->solverSets, b2_awakeSet );
+
+		// Transfer body to awake set
+		b2TransferBody( world, awakeSet, staticSet, body );
+
 		// Create island for body
 		b2CreateIslandForBody( world, b2_awakeSet, body );
+
+		// Transfer static joints to awake set
+		int jointKey = body->headJointKey;
+		while ( jointKey != B2_NULL_INDEX )
+		{
+			int jointId = jointKey >> 1;
+			int edgeIndex = jointKey & 1;
+
+			b2Joint* joint = b2JointArray_Get( &world->joints, jointId );
+
+			// Transfer the joint if it is in the static set
+			if ( joint->setIndex == b2_staticSet )
+			{
+				b2TransferJoint( world, awakeSet, staticSet, joint );
+			}
+			else if ( joint->setIndex == b2_awakeSet )
+			{
+				// In this case the joint must be re-inserted into the constraint graph to ensure the correct
+				// graph color.
+
+				// First transfer to the static set.
+				b2TransferJoint( world, staticSet, awakeSet, joint );
+
+				// Now transfer it back to the awake set and into the graph coloring.
+				b2TransferJoint( world, awakeSet, staticSet, joint );
+			}
+			else
+			{
+				// Otherwise the joint must be disabled.
+				B2_ASSERT( joint->setIndex == b2_disabledSet );
+			}
+
+			jointKey = joint->edges[edgeIndex].nextKey;
+		}
+
+		// Recreate shape proxies in movable tree.
+		b2Transform transform = b2GetBodyTransformQuick( world, body );
+		int shapeId = body->headShapeId;
+		while ( shapeId != B2_NULL_INDEX )
+		{
+			b2Shape* shape = b2ShapeArray_Get( &world->shapes, shapeId );
+			shapeId = shape->nextShapeId;
+			b2DestroyShapeProxy( shape, &world->broadPhase );
+			bool forcePairCreation = true;
+			b2BodyType proxyType = type;
+			b2CreateShapeProxy( shape, &world->broadPhase, proxyType, transform, forcePairCreation );
+		}
 	}
 	else if ( type == b2_staticBody )
 	{
+		// The body is going from dynamic/kinematic to static. It should be awake.
+		B2_ASSERT( body->setIndex == b2_awakeSet );
+
+		b2SolverSet* staticSet = b2SolverSetArray_Get( &world->solverSets, b2_staticSet );
+		b2SolverSet* awakeSet = b2SolverSetArray_Get( &world->solverSets, b2_awakeSet );
+
+		// Transfer body to static set
+		b2TransferBody( world, staticSet, awakeSet, body );
+
 		// Remove body from island.
 		b2RemoveBodyFromIsland( world, body );
-	}
 
-	// Stage 7: Transfer joints to the target set
-	jointKey = body->headJointKey;
-	while ( jointKey != B2_NULL_INDEX )
-	{
-		int jointId = jointKey >> 1;
-		int edgeIndex = jointKey & 1;
+		b2BodySim* bodySim = b2BodySimArray_Get( &staticSet->bodySims, body->localIndex );
+		bodySim->isFast = false;
 
-		b2Joint* joint = b2JointArray_Get( &world->joints, jointId );
-
-		jointKey = joint->edges[edgeIndex].nextKey;
-
-		// Joint may be disabled by other body
-		if ( joint->setIndex == b2_disabledSet )
+		// Maybe transfer joints to static set.
+		int jointKey = body->headJointKey;
+		while ( jointKey != B2_NULL_INDEX )
 		{
-			continue;
+			int jointId = jointKey >> 1;
+			int edgeIndex = jointKey & 1;
+
+			b2Joint* joint = b2JointArray_Get( &world->joints, jointId );
+			jointKey = joint->edges[edgeIndex].nextKey;
+
+			int otherEdgeIndex = edgeIndex ^ 1;
+			b2Body* otherBody = b2BodyArray_Get( &world->bodies, joint->edges[otherEdgeIndex].bodyId );
+
+			// Skip disabled joint
+			if ( joint->setIndex == b2_disabledSet )
+			{
+				// Joint is disable, should be connected to a disabled body
+				B2_ASSERT( otherBody->setIndex == b2_disabledSet );
+				continue;
+			}
+
+			// Since the body was not static, the joint must be awake.
+			B2_ASSERT( joint->setIndex == b2_awakeSet );
+
+			// Only transfer joint to static set if both bodies are static.
+			if ( otherBody->setIndex == b2_staticSet )
+			{
+				b2TransferJoint( world, staticSet, awakeSet, joint );
+			}
+			else
+			{
+				// The other body must be awake.
+				B2_ASSERT( otherBody->setIndex == b2_awakeSet );
+
+				// The joint must live in a graph color.
+				B2_ASSERT( 0 <= joint->colorIndex && joint->colorIndex < B2_GRAPH_COLOR_COUNT );
+
+				// In this case the joint must be re-inserted into the constraint graph to ensure the correct
+				// graph color.
+
+				// First transfer to the static set.
+				b2TransferJoint( world, staticSet, awakeSet, joint );
+
+				// Now transfer it back to the awake set and into the graph coloring.
+				b2TransferJoint( world, awakeSet, staticSet, joint );
+			}
 		}
 
-		// All joints were transferred to the static set in an earlier stage
-		B2_ASSERT( joint->setIndex == b2_staticSet );
-
-		b2Body* bodyA = b2BodyArray_Get( &world->bodies, joint->edges[0].bodyId );
-		b2Body* bodyB = b2BodyArray_Get( &world->bodies, joint->edges[1].bodyId );
-		B2_ASSERT( bodyA->setIndex == b2_staticSet || bodyA->setIndex == b2_awakeSet );
-		B2_ASSERT( bodyB->setIndex == b2_staticSet || bodyB->setIndex == b2_awakeSet );
-
-		if ( bodyA->type == b2_dynamicBody || bodyB->type == b2_dynamicBody )
+		// Recreate shape proxies in static tree.
+		b2Transform transform = b2GetBodyTransformQuick( world, body );
+		int shapeId = body->headShapeId;
+		while ( shapeId != B2_NULL_INDEX )
 		{
-			b2TransferJoint( world, awakeSet, staticSet, joint );
+			b2Shape* shape = b2ShapeArray_Get( &world->shapes, shapeId );
+			shapeId = shape->nextShapeId;
+			b2DestroyShapeProxy( shape, &world->broadPhase );
+			bool forcePairCreation = true;
+			b2CreateShapeProxy( shape, &world->broadPhase, b2_staticBody, transform, forcePairCreation );
 		}
 	}
-
-	// Recreate shape proxies in broadphase
-	b2Transform transform = b2GetBodyTransformQuick( world, body );
-	int shapeId = body->headShapeId;
-	while ( shapeId != B2_NULL_INDEX )
+	else
 	{
-		b2Shape* shape = b2ShapeArray_Get( &world->shapes, shapeId );
-		shapeId = shape->nextShapeId;
-		b2DestroyShapeProxy( shape, &world->broadPhase );
-		bool forcePairCreation = true;
-		b2CreateShapeProxy( shape, &world->broadPhase, type, transform, forcePairCreation );
+		B2_ASSERT( originalType == b2_dynamicBody || originalType == b2_kinematicBody );
+		B2_ASSERT( type == b2_dynamicBody || type == b2_kinematicBody );
+
+		// Recreate shape proxies in static tree.
+		b2Transform transform = b2GetBodyTransformQuick( world, body );
+		int shapeId = body->headShapeId;
+		while ( shapeId != B2_NULL_INDEX )
+		{
+			b2Shape* shape = b2ShapeArray_Get( &world->shapes, shapeId );
+			shapeId = shape->nextShapeId;
+			b2DestroyShapeProxy( shape, &world->broadPhase );
+			b2BodyType proxyType = type;
+			bool forcePairCreation = true;
+			b2CreateShapeProxy( shape, &world->broadPhase, proxyType, transform, forcePairCreation );
+		}
 	}
 
 	// Relink all joints
-	jointKey = body->headJointKey;
-	while ( jointKey != B2_NULL_INDEX )
 	{
-		int jointId = jointKey >> 1;
-		int edgeIndex = jointKey & 1;
-
-		b2Joint* joint = b2JointArray_Get( &world->joints, jointId );
-		jointKey = joint->edges[edgeIndex].nextKey;
-
-		int otherEdgeIndex = edgeIndex ^ 1;
-		int otherBodyId = joint->edges[otherEdgeIndex].bodyId;
-		b2Body* otherBody = b2BodyArray_Get( &world->bodies, otherBodyId );
-
-		if ( otherBody->setIndex == b2_disabledSet )
+		int jointKey = body->headJointKey;
+		while ( jointKey != B2_NULL_INDEX )
 		{
-			continue;
+			int jointId = jointKey >> 1;
+			int edgeIndex = jointKey & 1;
+
+			b2Joint* joint = b2JointArray_Get( &world->joints, jointId );
+			jointKey = joint->edges[edgeIndex].nextKey;
+
+			int otherEdgeIndex = edgeIndex ^ 1;
+			int otherBodyId = joint->edges[otherEdgeIndex].bodyId;
+			b2Body* otherBody = b2BodyArray_Get( &world->bodies, otherBodyId );
+
+			if ( otherBody->setIndex == b2_disabledSet )
+			{
+				continue;
+			}
+
+			if ( body->type == b2_staticBody && otherBody->type == b2_staticBody )
+			{
+				continue;
+			}
+
+			b2LinkJoint( world, joint, false );
 		}
 
-		if ( body->type != b2_dynamicBody && otherBody->type != b2_dynamicBody )
-		{
-			continue;
-		}
-
-		b2LinkJoint( world, joint );
+		b2MergeAwakeIslands( world );
 	}
 
 	// Body type affects the mass
 	b2UpdateBodyMassData( world, body );
 
-	b2BodyState* state = b2GetBodyState( world, body );
-	if ( state != NULL )
-	{
-		// Ensure flags are in sync (b2_skipSolverWrite)
-		state->flags = body->flags;
-	}
-
 	b2ValidateSolverSets( world );
-	b2ValidateIsland( world, body->islandId );
 }
 
 void b2Body_SetName( b2BodyId bodyId, const char* name )
@@ -1318,24 +1288,18 @@ void b2Body_SetName( b2BodyId bodyId, const char* name )
 	b2World* world = b2GetWorld( bodyId.world0 );
 	b2Body* body = b2GetBodyFullId( world, bodyId );
 
-	if ( name )
+	if ( name != NULL )
 	{
-		int i = 0;
-		while ( i < B2_NAME_LENGTH - 1 && name[i] != 0 )
+		for ( int i = 0; i < 31; ++i )
 		{
 			body->name[i] = name[i];
-			i += 1;
 		}
 
-		while ( i < B2_NAME_LENGTH )
-		{
-			body->name[i] = 0;
-			i += 1;
-		}
+		body->name[31] = 0;
 	}
 	else
 	{
-		memset( body->name, 0, B2_NAME_LENGTH * sizeof( char ) );
+		memset( body->name, 0, 32 * sizeof( char ) );
 	}
 }
 
@@ -1543,36 +1507,6 @@ void b2Body_SetAwake( b2BodyId bodyId, bool awake )
 	}
 }
 
-void b2Body_WakeTouching(b2BodyId bodyId)
-{
-	b2World* world = b2GetWorld( bodyId.world0 );
-	b2Body* body = b2GetBodyFullId( world, bodyId );
-
-	int contactKey = body->headContactKey;
-	while ( contactKey != B2_NULL_INDEX )
-	{
-		int contactId = contactKey >> 1;
-		int edgeIndex = contactKey & 1;
-
-		b2Contact* contact = b2ContactArray_Get( &world->contacts, contactId );
-		b2Shape* shapeA = b2ShapeArray_Get( &world->shapes, contact->shapeIdA );
-		b2Shape* shapeB = b2ShapeArray_Get( &world->shapes, contact->shapeIdB );
-
-		if (shapeA->bodyId == bodyId.index1 - 1)
-		{
-			b2Body* otherBody = b2BodyArray_Get( &world->bodies, shapeB->bodyId );
-			b2WakeBody( world, otherBody );
-		}
-		else
-		{
-			b2Body* otherBody = b2BodyArray_Get( &world->bodies, shapeA->bodyId );
-			b2WakeBody( world, otherBody );
-		}
-
-		contactKey = contact->edges[edgeIndex].nextKey;
-	}
-}
-
 bool b2Body_IsEnabled( b2BodyId bodyId )
 {
 	b2World* world = b2GetWorld( bodyId.world0 );
@@ -1619,7 +1553,7 @@ void b2Body_EnableSleep( b2BodyId bodyId, bool enableSleep )
 }
 
 // Disabling a body requires a lot of detailed bookkeeping, but it is a valuable feature.
-// The most challenging aspect is that joints may connect to bodies that are not disabled.
+// The most challenging aspect that joints may connect to bodies that are not disabled.
 void b2Body_Disable( b2BodyId bodyId )
 {
 	b2World* world = b2GetWorldLocked( bodyId.world0 );
@@ -1639,13 +1573,26 @@ void b2Body_Disable( b2BodyId bodyId )
 	bool wakeBodies = true;
 	b2DestroyBodyContacts( world, body, wakeBodies );
 
-	// The current solver set of the body
-	b2SolverSet* set = b2SolverSetArray_Get( &world->solverSets, body->setIndex );
+	// Disabled bodies are not in an island.
+	b2RemoveBodyFromIsland( world, body );
 
-	// Disabled bodies and connected joints are moved to the disabled set
+	// Remove shapes from broad-phase
+	int shapeId = body->headShapeId;
+	while ( shapeId != B2_NULL_INDEX )
+	{
+		b2Shape* shape = b2ShapeArray_Get( &world->shapes, shapeId );
+		shapeId = shape->nextShapeId;
+		b2DestroyShapeProxy( shape, &world->broadPhase );
+	}
+
+	// Transfer simulation data to disabled set
+	b2SolverSet* set = b2SolverSetArray_Get( &world->solverSets, body->setIndex );
 	b2SolverSet* disabledSet = b2SolverSetArray_Get( &world->solverSets, b2_disabledSet );
 
-	// Unlink joints and transfer them to the disabled set
+	// Transfer body sim
+	b2TransferBody( world, disabledSet, set, body );
+
+	// Unlink joints and transfer
 	int jointKey = body->headJointKey;
 	while ( jointKey != B2_NULL_INDEX )
 	{
@@ -1664,27 +1611,15 @@ void b2Body_Disable( b2BodyId bodyId )
 		B2_ASSERT( joint->setIndex == set->setIndex || set->setIndex == b2_staticSet );
 
 		// Remove joint from island
-		b2UnlinkJoint( world, joint );
+		if ( joint->islandId != B2_NULL_INDEX )
+		{
+			b2UnlinkJoint( world, joint );
+		}
 
 		// Transfer joint to disabled set
 		b2SolverSet* jointSet = b2SolverSetArray_Get( &world->solverSets, joint->setIndex );
 		b2TransferJoint( world, disabledSet, jointSet, joint );
 	}
-
-	// Remove shapes from broad-phase
-	int shapeId = body->headShapeId;
-	while ( shapeId != B2_NULL_INDEX )
-	{
-		b2Shape* shape = b2ShapeArray_Get( &world->shapes, shapeId );
-		shapeId = shape->nextShapeId;
-		b2DestroyShapeProxy( shape, &world->broadPhase );
-	}
-
-	// Disabled bodies are not in an island. If the island becomes empty it will be destroyed.
-	b2RemoveBodyFromIsland( world, body );
-
-	// Transfer body sim
-	b2TransferBody( world, disabledSet, set, body );
 
 	b2ValidateConnectivity( world );
 	b2ValidateSolverSets( world );
@@ -1731,6 +1666,7 @@ void b2Body_Enable( b2BodyId bodyId )
 
 	// Transfer joints. If the other body is disabled, don't transfer.
 	// If the other body is sleeping, wake it.
+	bool mergeIslands = false;
 	int jointKey = body->headJointKey;
 	while ( jointKey != B2_NULL_INDEX )
 	{
@@ -1773,14 +1709,17 @@ void b2Body_Enable( b2BodyId bodyId )
 		// Now that the joint is in the correct set, I can link the joint in the island.
 		if ( jointSetId != b2_staticSet )
 		{
-			b2LinkJoint( world, joint );
+			b2LinkJoint( world, joint, mergeIslands );
 		}
 	}
+
+	// Now merge islands
+	b2MergeAwakeIslands( world );
 
 	b2ValidateSolverSets( world );
 }
 
-void b2Body_SetMotionLocks( b2BodyId bodyId, b2MotionLocks locks )
+void b2Body_SetFixedRotation( b2BodyId bodyId, bool flag )
 {
 	b2World* world = b2GetWorldLocked( bodyId.world0 );
 	if ( world == NULL )
@@ -1788,55 +1727,25 @@ void b2Body_SetMotionLocks( b2BodyId bodyId, b2MotionLocks locks )
 		return;
 	}
 
-	uint32_t newFlags = 0;
-	newFlags |= locks.linearX ? b2_lockLinearX : 0;
-	newFlags |= locks.linearY ? b2_lockLinearY : 0;
-	newFlags |= locks.angularZ ? b2_lockAngularZ : 0;
-
 	b2Body* body = b2GetBodyFullId( world, bodyId );
-	if ( ( body->flags & b2_allLocks ) != newFlags )
+	if ( body->fixedRotation != flag )
 	{
-		body->flags &= ~b2_allLocks;
-		body->flags |= newFlags;
-
-		b2BodySim* bodySim = b2GetBodySim( world, body );
-		bodySim->flags &= ~b2_allLocks;
-		bodySim->flags |= newFlags;
+		body->fixedRotation = flag;
 
 		b2BodyState* state = b2GetBodyState( world, body );
-
 		if ( state != NULL )
 		{
-			state->flags = bodySim->flags;
-
-			if ( locks.linearX )
-			{
-				state->linearVelocity.x = 0.0f;
-			}
-
-			if ( locks.linearY )
-			{
-				state->linearVelocity.y = 0.0f;
-			}
-
-			if ( locks.angularZ )
-			{
-				state->angularVelocity = 0.0f;
-			}
+			state->angularVelocity = 0.0f;
 		}
+		b2UpdateBodyMassData( world, body );
 	}
 }
 
-b2MotionLocks b2Body_GetMotionLocks( b2BodyId bodyId )
+bool b2Body_IsFixedRotation( b2BodyId bodyId )
 {
 	b2World* world = b2GetWorld( bodyId.world0 );
 	b2Body* body = b2GetBodyFullId( world, bodyId );
-
-	b2MotionLocks locks;
-	locks.linearX = ( body->flags & b2_lockLinearX );
-	locks.linearY = ( body->flags & b2_lockLinearY );
-	locks.angularZ = ( body->flags & b2_lockAngularZ );
-	return locks;
+	return body->fixedRotation;
 }
 
 void b2Body_SetBullet( b2BodyId bodyId, bool flag )
@@ -1849,15 +1758,7 @@ void b2Body_SetBullet( b2BodyId bodyId, bool flag )
 
 	b2Body* body = b2GetBodyFullId( world, bodyId );
 	b2BodySim* bodySim = b2GetBodySim( world, body );
-
-	if ( flag )
-	{
-		bodySim->flags |= b2_isBullet;
-	}
-	else
-	{
-		bodySim->flags &= ~b2_isBullet;
-	}
+	bodySim->isBullet = flag;
 }
 
 bool b2Body_IsBullet( b2BodyId bodyId )
@@ -1865,7 +1766,7 @@ bool b2Body_IsBullet( b2BodyId bodyId )
 	b2World* world = b2GetWorld( bodyId.world0 );
 	b2Body* body = b2GetBodyFullId( world, bodyId );
 	b2BodySim* bodySim = b2GetBodySim( world, body );
-	return ( bodySim->flags & b2_isBullet ) != 0;
+	return bodySim->isBullet;
 }
 
 void b2Body_EnableContactEvents( b2BodyId bodyId, bool flag )

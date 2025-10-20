@@ -7,14 +7,15 @@
 #include "body.h"
 #include "core.h"
 #include "island.h"
-#include "physics_world.h"
 #include "shape.h"
 #include "solver_set.h"
 #include "table.h"
+#include "world.h"
 
-// needed for dll export
-#include "box2d/box2d.h"
+#include "box2d/collision.h"
 
+#include <float.h>
+#include <math.h>
 #include <stddef.h>
 
 B2_ARRAY_SOURCE( b2Contact, b2Contact )
@@ -53,43 +54,6 @@ B2_ARRAY_SOURCE( b2ContactSim, b2ContactSim )
 // Third:
 // The user may call the manifold functions directly and they should be easy to use and have easy to use
 // results.
-
-static b2Contact* b2GetContactFullId( b2World* world, b2ContactId contactId )
-{
-	int id = contactId.index1 - 1;
-	b2Contact* contact = b2ContactArray_Get( &world->contacts, id );
-	B2_ASSERT( contact->contactId == id && contact->generation == contactId.generation );
-	return contact;
-}
-
-b2ContactData b2Contact_GetData( b2ContactId contactId )
-{
-	b2World* world = b2GetWorld( contactId.world0 );
-	b2Contact* contact = b2GetContactFullId( world, contactId );
-	b2ContactSim* contactSim = b2GetContactSim( world, contact );
-	const b2Shape* shapeA = b2ShapeArray_Get( &world->shapes, contact->shapeIdA );
-	const b2Shape* shapeB = b2ShapeArray_Get( &world->shapes, contact->shapeIdB );
-
-	b2ContactData data = {
-		.contactId = contactId,
-		.shapeIdA =
-			{
-				.index1 = shapeA->id + 1,
-				.world0 = (uint16_t)contactId.world0,
-				.generation = shapeA->generation,
-			},
-		.shapeIdB =
-			{
-				.index1 = shapeB->id + 1,
-				.world0 = (uint16_t)contactId.world0,
-				.generation = shapeB->generation,
-			},
-		.manifold = contactSim->manifold,
-	};
-
-	return data;
-}
-
 typedef b2Manifold b2ManifoldFcn( const b2Shape* shapeA, b2Transform xfA, const b2Shape* shapeB, b2Transform xfB,
 								  b2SimplexCache* cache );
 
@@ -265,7 +229,7 @@ void b2CreateContact( b2World* world, b2Shape* shapeA, b2Shape* shapeB )
 	int contactId = b2AllocId( &world->contactIdPool );
 	if ( contactId == world->contacts.count )
 	{
-		b2ContactArray_Push( &world->contacts, (b2Contact){ 0 } );
+		b2ContactArray_Push( &world->contacts, ( b2Contact ){ 0 } );
 	}
 
 	int shapeIdA = shapeA->id;
@@ -273,7 +237,6 @@ void b2CreateContact( b2World* world, b2Shape* shapeA, b2Shape* shapeB )
 
 	b2Contact* contact = b2ContactArray_Get( &world->contacts, contactId );
 	contact->contactId = contactId;
-	contact->generation += 1;
 	contact->setIndex = setIndex;
 	contact->colorIndex = B2_NULL_INDEX;
 	contact->localIndex = set->contactSims.count;
@@ -282,7 +245,7 @@ void b2CreateContact( b2World* world, b2Shape* shapeA, b2Shape* shapeB )
 	contact->islandNext = B2_NULL_INDEX;
 	contact->shapeIdA = shapeIdA;
 	contact->shapeIdB = shapeIdB;
-	//contact->isMarked = false;
+	contact->isMarked = false;
 	contact->flags = 0;
 
 	B2_ASSERT( shapeA->sensorIndex == B2_NULL_INDEX && shapeB->sensorIndex == B2_NULL_INDEX );
@@ -349,13 +312,11 @@ void b2CreateContact( b2World* world, b2Shape* shapeA, b2Shape* shapeB )
 	contactSim->shapeIdA = shapeIdA;
 	contactSim->shapeIdB = shapeIdB;
 	contactSim->cache = b2_emptySimplexCache;
-	contactSim->manifold = (b2Manifold){ 0 };
+	contactSim->manifold = ( b2Manifold ){ 0 };
 
 	// These also get updated in the narrow phase
-	contactSim->friction = world->frictionCallback( shapeA->material.friction, shapeA->material.userMaterialId,
-													shapeB->material.friction, shapeB->material.userMaterialId );
-	contactSim->restitution = world->restitutionCallback( shapeA->material.restitution, shapeA->material.userMaterialId,
-														  shapeB->material.restitution, shapeB->material.userMaterialId );
+	contactSim->friction = world->frictionCallback(shapeA->friction, shapeA->userMaterialId, shapeB->friction, shapeB->userMaterialId);
+	contactSim->restitution = world->restitutionCallback(shapeA->restitution, shapeA->userMaterialId, shapeB->restitution, shapeB->userMaterialId);
 
 	contactSim->tangentSpeed = 0.0f;
 	contactSim->simFlags = 0;
@@ -399,19 +360,7 @@ void b2DestroyContact( b2World* world, b2Contact* contact, bool wakeBodies )
 		b2ShapeId shapeIdA = { shapeA->id + 1, worldId, shapeA->generation };
 		b2ShapeId shapeIdB = { shapeB->id + 1, worldId, shapeB->generation };
 
-		b2ContactId contactId = {
-			.index1 = contact->contactId + 1,
-			.world0 = world->worldId,
-			.padding = 0,
-			.generation = contact->generation,
-		};
-
-		b2ContactEndTouchEvent event = {
-			.shapeIdA = shapeIdA,
-			.shapeIdB = shapeIdB,
-			.contactId = contactId,
-		};
-
+		b2ContactEndTouchEvent event = { shapeIdA, shapeIdB };
 		b2ContactEndTouchEventArray_Push( world->contactEndEvents + world->endEventArrayIndex, event );
 	}
 
@@ -490,11 +439,11 @@ void b2DestroyContact( b2World* world, b2Contact* contact, bool wakeBodies )
 		}
 	}
 
-	// Free contact and id (preserve generation)
 	contact->contactId = B2_NULL_INDEX;
 	contact->setIndex = B2_NULL_INDEX;
 	contact->colorIndex = B2_NULL_INDEX;
 	contact->localIndex = B2_NULL_INDEX;
+
 	b2FreeId( &world->contactIdPool, contactId );
 
 	if ( wakeBodies && touching )
@@ -531,25 +480,23 @@ bool b2UpdateContact( b2World* world, b2ContactSim* contactSim, b2Shape* shapeA,
 	contactSim->manifold = fcn( shapeA, transformA, shapeB, transformB, &contactSim->cache );
 
 	// Keep these updated in case the values on the shapes are modified
-	contactSim->friction = world->frictionCallback( shapeA->material.friction, shapeA->material.userMaterialId,
-													shapeB->material.friction, shapeB->material.userMaterialId );
-	contactSim->restitution = world->restitutionCallback( shapeA->material.restitution, shapeA->material.userMaterialId,
-														  shapeB->material.restitution, shapeB->material.userMaterialId );
+	contactSim->friction = world->frictionCallback( shapeA->friction, shapeA->userMaterialId, shapeB->friction, shapeB->userMaterialId );
+	contactSim->restitution = world->restitutionCallback( shapeA->restitution, shapeA->userMaterialId, shapeB->restitution, shapeB->userMaterialId );
 
-	if ( shapeA->material.rollingResistance > 0.0f || shapeB->material.rollingResistance > 0.0f )
+	// todo branch improves perf?
+	if (shapeA->rollingResistance > 0.0f || shapeB->rollingResistance > 0.0f)
 	{
 		float radiusA = b2GetShapeRadius( shapeA );
 		float radiusB = b2GetShapeRadius( shapeB );
 		float maxRadius = b2MaxFloat( radiusA, radiusB );
-		contactSim->rollingResistance =
-			b2MaxFloat( shapeA->material.rollingResistance, shapeB->material.rollingResistance ) * maxRadius;
+		contactSim->rollingResistance = b2MaxFloat( shapeA->rollingResistance, shapeB->rollingResistance ) * maxRadius;
 	}
 	else
 	{
 		contactSim->rollingResistance = 0.0f;
 	}
 
-	contactSim->tangentSpeed = shapeA->material.tangentSpeed + shapeB->material.tangentSpeed;
+	contactSim->tangentSpeed = shapeA->tangentSpeed + shapeB->tangentSpeed;
 
 	int pointCount = contactSim->manifold.pointCount;
 	bool touching = pointCount > 0;
@@ -559,28 +506,13 @@ bool b2UpdateContact( b2World* world, b2ContactSim* contactSim, b2Shape* shapeA,
 		b2ShapeId shapeIdA = { shapeA->id + 1, world->worldId, shapeA->generation };
 		b2ShapeId shapeIdB = { shapeB->id + 1, world->worldId, shapeB->generation };
 
-		b2Manifold* manifold = &contactSim->manifold;
-		float bestSeparation = manifold->points[0].separation;
-		b2Vec2 bestPoint = manifold->points[0].point;
-
-		// Get deepest point
-		for ( int i = 1; i < manifold->pointCount; ++i )
-		{
-			float separation = manifold->points[i].separation;
-			if ( separation < bestSeparation )
-			{
-				bestSeparation = separation;
-				bestPoint = manifold->points[i].point;
-			}
-		}
-
 		// this call assumes thread safety
-		touching = world->preSolveFcn( shapeIdA, shapeIdB, bestPoint, manifold->normal, world->preSolveContext );
+		touching = world->preSolveFcn( shapeIdA, shapeIdB, &contactSim->manifold, world->preSolveContext );
 		if ( touching == false )
 		{
 			// disable contact
 			pointCount = 0;
-			manifold->pointCount = 0;
+			contactSim->manifold.pointCount = 0;
 		}
 	}
 
@@ -609,7 +541,7 @@ bool b2UpdateContact( b2World* world, b2ContactSim* contactSim, b2Shape* shapeA,
 		contactSim->simFlags &= ~b2_simEnableHitEvent;
 	}
 
-	if ( pointCount > 0 )
+	if (pointCount > 0)
 	{
 		contactSim->manifold.rollingImpulse = oldManifold.rollingImpulse;
 	}
@@ -698,4 +630,11 @@ bool b2UpdateContact( b2World* world, b2ContactSim* contactSim, b2Shape* shapeA,
 	}
 
 	return touching;
+}
+
+b2Manifold b2ComputeManifold( b2Shape* shapeA, b2Transform transformA, b2Shape* shapeB, b2Transform transformB )
+{
+	b2ManifoldFcn* fcn = s_registers[shapeA->type][shapeB->type].fcn;
+	b2SimplexCache cache = { 0 };
+	return fcn( shapeA, transformA, shapeB, transformB, &cache );
 }
